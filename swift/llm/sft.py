@@ -6,6 +6,8 @@ from typing import Any, Dict, Union
 import json
 import numpy as np
 import torch
+import torch.distributed as dist
+from datasets import Dataset
 from modelscope import BitsAndBytesConfig, GenerationConfig
 from transformers import IntervalStrategy
 from transformers.integrations import is_deepspeed_zero3_enabled
@@ -136,6 +138,16 @@ def llm_sft(args: SftArguments) -> Dict[str, Union[str, Any]]:
         check_dataset_strategy=args.check_dataset_strategy,
         model_name=args.model_name,
         model_author=args.model_author)
+    if args.val_dataset is not None:
+        # Loading val dataset
+        _, val_dataset = get_dataset(
+            args.val_dataset,
+            1.0,
+            args.dataset_seed,
+            check_dataset_strategy=args.check_dataset_strategy,
+            model_name=args.model_name,
+            model_author=args.model_author)
+
     train_dataset, val_dataset = args._handle_dataset_compat(train_dataset, val_dataset)
     logger.info(f'train_dataset: {train_dataset}')
     logger.info(f'val_dataset: {val_dataset}')
@@ -145,6 +157,8 @@ def llm_sft(args: SftArguments) -> Dict[str, Union[str, Any]]:
     if use_model:
         template_kwargs['model'] = model
     template_kwargs['use_loss_scale'] = args.use_loss_scale
+    if args.sequence_parallel_size and args.sequence_parallel_size > 1:
+        template_kwargs['sequence_parallel_size'] = args.sequence_parallel_size
     template: Template = get_template(args.template_type, tokenizer, args.system, args.max_length,
                                       args.truncation_strategy, **template_kwargs)
     args.system = template.default_system
@@ -227,6 +241,7 @@ def llm_sft(args: SftArguments) -> Dict[str, Union[str, Any]]:
         eval_dataset=val_dataset,
         tokenizer=tokenizer,
         callbacks=callbacks,
+        sequence_parallel_size=args.sequence_parallel_size,
         **trainer_kwargs)
     trainer.sft_args = args
     if use_torchacc():

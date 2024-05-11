@@ -423,6 +423,8 @@ class SftArguments(ArgumentsBase):
 
     dataset: List[str] = field(
         default_factory=list, metadata={'help': f'dataset choices: {list(DATASET_MAPPING.keys())}'})
+    val_dataset: List[str] = field(
+        default_factory=list, metadata={'help': f'dataset choices: {list(DATASET_MAPPING.keys())}'})
     dataset_seed: int = 42
     dataset_test_ratio: float = 0.01
     use_loss_scale: bool = False  # for agent
@@ -550,8 +552,8 @@ class SftArguments(ArgumentsBase):
     report_to: List[str] = field(default_factory=lambda: ['tensorboard'])
     acc_strategy: Literal['token', 'sentence'] = 'token'
     save_on_each_node: bool = True
-    evaluation_strategy: Literal['steps', 'no'] = 'steps'
-    save_strategy: Literal['steps', 'no'] = 'steps'
+    evaluation_strategy: Literal['steps', 'epoch', 'no'] = 'steps'
+    save_strategy: Literal['steps', 'epoch', 'no'] = 'steps'
     save_safetensors: bool = True
     gpu_memory_fraction: Optional[float] = None
     include_num_input_tokens_seen: Optional[bool] = False
@@ -573,6 +575,8 @@ class SftArguments(ArgumentsBase):
     # fsdp config file
     fsdp_config: Optional[str] = None
 
+    sequence_parallel_size: int = 1
+
     # compatibility hf
     per_device_train_batch_size: Optional[int] = None
     per_device_eval_batch_size: Optional[int] = None
@@ -587,6 +591,7 @@ class SftArguments(ArgumentsBase):
     neftune_alpha: Optional[float] = None
     deepspeed_config_path: Optional[str] = None
     model_cache_dir: Optional[str] = None
+
     custom_train_dataset_path: List[str] = field(default_factory=list)
     custom_val_dataset_path: List[str] = field(default_factory=list)
 
@@ -644,6 +649,9 @@ class SftArguments(ArgumentsBase):
     def __post_init__(self) -> None:
         self.handle_compatibility()
         self._register_self_cognition()
+        if self.val_dataset is not None:
+            self.dataset_test_ratio = 0.0 if self.val_dataset is not None else self.dataset_test_ratio
+            logger.info('Using val_dataset, ignoring dataset_test_ratio')
         self._handle_dataset_sample()
         if is_pai_training_job():
             self._handle_pai_compat()
