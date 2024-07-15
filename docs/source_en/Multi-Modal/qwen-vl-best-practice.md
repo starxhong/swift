@@ -1,4 +1,4 @@
-# Qwen-VL Best Practices
+# Qwen-VL Best Practice
 
 ## Table of Contents
 - [Environment Setup](#environment-setup)
@@ -136,7 +136,7 @@ LoRA fine-tuning:
 # 23GB GPU memory
 CUDA_VISIBLE_DEVICES=0 swift sft \
     --model_type qwen-vl-chat \
-    --dataset coco-mini-en \
+    --dataset coco-en-mini \
 ```
 
 Full parameter fine-tuning:
@@ -145,11 +145,11 @@ Full parameter fine-tuning:
 # 2 * 55 GPU memory
 CUDA_VISIBLE_DEVICES=0,1 swift sft \
     --model_type qwen-vl-chat \
-    --dataset coco-mini-en \
+    --dataset coco-en-mini \
     --sft_type full \
 ```
 
-[Custom datasets](../LLM/Customization.md#-Recommended-Command-line-arguments)  support json and jsonl formats. Here is an example of a custom dataset:
+[Custom datasets](../LLM/Customization.md#-Recommended-Command-line-arguments) support json and jsonl formats. Here is an example of a custom dataset:
 
 (Supports multi-turn dialogues, where each turn can contain multiple images or no images, and supports passing in local paths or URLs)
 

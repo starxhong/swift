@@ -3,6 +3,8 @@
 
 这里介绍对**Qwen1.5-7B-Chat**和对**Qwen1.5-72B-Chat**进行推理, 自我认知微调, 量化, 部署. 分别对应**低配置和高配置**环境.
 
+使用双卡80GiB A100对**Qwen2-72B-Instruct**进行自我认知微调并推理部署的最佳实践可以查看[这里](https://github.com/modelscope/swift/issues/1092).
+
 
 ## 目录
 - [环境准备](#环境准备)
@@ -126,7 +128,6 @@ gen = inference_stream_vllm(llm_engine, template, request_list)
 print_idx = 0
 print(f'query: {query}\nresponse: ', end='')
 for resp_list in gen:
-    request = request_list[0]
     resp = resp_list[0]
     response = resp['response']
     delta = response[print_idx:]
@@ -191,8 +192,7 @@ sft_args = SftArguments(
              f'{DatasetName.self_cognition}#500'],
     logging_steps=5,
     max_length=2048,
-    learning_rate=5e-5,
-    warmup_ratio=0.4,
+    learning_rate=1e-4,
     output_dir='output',
     lora_target_modules=['ALL'],
     model_name=['小黄', 'Xiao Huang'],
@@ -214,8 +214,7 @@ swift sft \
     --dataset alpaca-zh#500 alpaca-en#500 self-cognition#500 \
     --logging_steps 5 \
     --max_length 2048 \
-    --learning_rate 5e-5 \
-    --warmup_ratio 0.4 \
+    --learning_rate 1e-4 \
     --output_dir output \
     --lora_target_modules ALL \
     --model_name 小黄 'Xiao Huang' \
@@ -233,8 +232,7 @@ swift sft \
     --dataset alpaca-zh#500 alpaca-en#500 self-cognition#500 \
     --logging_steps 5 \
     --max_length 2048 \
-    --learning_rate 5e-5 \
-    --warmup_ratio 0.4 \
+    --learning_rate 1e-4 \
     --output_dir output \
     --lora_target_modules ALL \
     --model_name 小黄 'Xiao Huang' \
@@ -347,7 +345,6 @@ gen = inference_stream_vllm(llm_engine, template, request_list)
 print_idx = 0
 print(f'query: {query}\nresponse: ', end='')
 for resp_list in gen:
-    request = request_list[0]
     resp = resp_list[0]
     response = resp['response']
     delta = response[print_idx:]
@@ -413,7 +410,9 @@ for query in ['78654+657=?', '晚上睡不着觉怎么办']:
 
     print(f'query: {query}')
     print('response: ', end='')
+    response = ''
     for chunk in stream_resp:
+        response += chunk.choices[0].delta.content
         print(chunk.choices[0].delta.content, end='', flush=True)
     print()
     messages.append({'role': 'assistant', 'content': response})
@@ -482,8 +481,7 @@ swift sft \
     --dataset alpaca-zh#500 alpaca-en#500 self-cognition#500 \
     --logging_steps 5 \
     --max_length 4096 \
-    --learning_rate 5e-5 \
-    --warmup_ratio 0.4 \
+    --learning_rate 1e-4 \
     --output_dir output \
     --lora_target_modules ALL \
     --model_name 小黄 'Xiao Huang' \
@@ -574,7 +572,9 @@ for query in ['78654+657=?', '晚上睡不着觉怎么办']:
 
     print(f'query: {query}')
     print('response: ', end='')
+    response = ''
     for chunk in stream_resp:
+        response += chunk.choices[0].delta.content
         print(chunk.choices[0].delta.content, end='', flush=True)
     print()
     messages.append({'role': 'assistant', 'content': response})

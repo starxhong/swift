@@ -2,6 +2,8 @@
 
 import os
 import socket
+import time
+import uuid
 from bisect import bisect_right
 from typing import List, Optional, Tuple
 
@@ -9,9 +11,9 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn import Module
-from transformers.utils import is_torch_npu_available
+from transformers.utils import is_torch_npu_available, strtobool
 
-from .logger import get_logger, is_master
+from .logger import get_logger
 
 logger = get_logger()
 
@@ -30,6 +32,12 @@ def _find_free_port() -> str:
     sock.close()
     # NOTE: there is still a chance the port could be taken by other processes.
     return port
+
+
+def _find_local_mac() -> str:
+    mac = uuid.getnode()
+    mac_address = ':'.join(('%012x' % mac)[i:i + 2] for i in range(0, 12, 2))
+    return mac_address
 
 
 def get_model_info(model: Module, name: Optional[str] = None) -> str:
@@ -74,8 +82,17 @@ def is_local_master():
     return local_rank in {-1, 0}
 
 
+def is_master():
+    rank = get_dist_setting()[0]
+    return rank in {-1, 0}
+
+
 def use_torchacc() -> bool:
-    return os.getenv('USE_TORCHACC', '0') == '1'
+    return strtobool(os.getenv('USE_TORCHACC', '0'))
+
+
+def torchacc_trim_graph():
+    return strtobool(os.getenv('TORCHACC_TRIM_GRAPH', '0'))
 
 
 def is_dist():
@@ -124,7 +141,7 @@ def freeze_model_parameters(model: Module, freeze_parameters: float) -> None:
         p.requires_grad = False
 
 
-def activate_model_parameters(model: Module, additional_trainable_parameters: List[int]) -> None:
+def activate_model_parameters(model: Module, additional_trainable_parameters: List[str]) -> None:
     if len(additional_trainable_parameters) == 0:
         return
     has_activate = False
@@ -147,6 +164,8 @@ def broadcast_string(string: Optional[str], buffer_size: int = 1024) -> str:
     assert dist.is_initialized()
     rank, local_rank, _, _ = get_dist_setting()
     device = f'npu:{local_rank}' if is_torch_npu_available() else f'cuda:{local_rank}'
+    if use_torchacc():
+        device = 'xla'
     assert rank >= 0
     if rank == 0:
         assert string is not None
@@ -155,6 +174,8 @@ def broadcast_string(string: Optional[str], buffer_size: int = 1024) -> str:
     else:
         tensor = torch.zeros(buffer_size, dtype=torch.int64, device=device)
     dist.broadcast(tensor, 0)
+    if use_torchacc():
+        tensor = tensor.to('cpu')
     first_zero = (tensor == 0).nonzero()[0].item()
     res = tensor.tolist()[:first_zero]
     return ''.join([chr(x) for x in res])
