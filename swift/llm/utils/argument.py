@@ -919,6 +919,7 @@ class InferArguments(ArgumentsBase):
     load_args_from_ckpt_dir: bool = True
     load_dataset_config: bool = False
     eval_human: Optional[bool] = None
+    result_dir: Optional[str] = field(default=None, metadata={'help': '/path/to/your/infer_result'})
 
     device_map_config_path: Optional[str] = None
 
