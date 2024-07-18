@@ -1975,7 +1975,7 @@ def _repair_conversations_agent_instruct(s: str) -> List[Dict[str, Any]]:
 
 register_dataset(
     DatasetName.agent_instruct_all_en,
-    'swift/AgentInstruct_copy', ['alfworld', 'db', 'kg', 'mind2web', 'os', 'webshop'],
+    'huangjintao/AgentInstruct_copy', ['alfworld', 'db', 'kg', 'mind2web', 'os', 'webshop'],
     ConversationsPreprocessor('human', 'gpt', repair_conversations=_repair_conversations_agent_instruct),
     get_dataset_from_repo,
     tags=['chat', 'agent', 'multi-round'])
@@ -2357,6 +2357,8 @@ def _dataset_id_to_name(dataset_name_list: List[str]) -> List[str]:
         if os.path.isfile(d_id_or_path):
             d_info['dataset_path'] = d_id_or_path
         else:
+            if d_id_or_path.startswith('/'):
+                raise ValueError(f"path: '{d_id_or_path}' not found")
             if use_hf:
                 d_info['hf_dataset_id'] = d_id_or_path
             else:

@@ -272,11 +272,13 @@ class ModelType:
     internvl_chat_v1_5_int8 = 'internvl-chat-v1_5-int8'
     mini_internvl_chat_2b_v1_5 = 'mini-internvl-chat-2b-v1_5'
     mini_internvl_chat_4b_v1_5 = 'mini-internvl-chat-4b-v1_5'
+    internvl2_1b = 'internvl2-1b'
     internvl2_2b = 'internvl2-2b'
     internvl2_4b = 'internvl2-4b'
     internvl2_8b = 'internvl2-8b'
     internvl2_26b = 'internvl2-26b'
     internvl2_40b = 'internvl2-40b'
+    internvl2_llama3_76b = 'internvl2-llama3-76b'
     # deepseek
     deepseek_7b = 'deepseek-7b'
     deepseek_7b_chat = 'deepseek-7b-chat'
@@ -298,6 +300,8 @@ class ModelType:
     deepseek_math_7b = 'deepseek-math-7b'
     deepseek_math_7b_instruct = 'deepseek-math-7b-instruct'
     deepseek_math_7b_chat = 'deepseek-math-7b-chat'
+    # numina-math
+    numina_math_7b = 'numina-math-7b'
     # deepseek-vl
     deepseek_vl_1_3b_chat = 'deepseek-vl-1_3b-chat'
     deepseek_vl_7b_chat = 'deepseek-vl-7b-chat'
@@ -1561,7 +1565,7 @@ def get_model_tokenizer_chatglm(model_dir: str,
     TemplateType.chatglm_generation,
     support_vllm=True,
     support_flash_attn=True,
-    requires=['transformers<4.42'],
+    # requires=['transformers>=4.42'],
     hf_model_id='THUDM/glm-4-9b')
 @register_model(
     ModelType.glm4_9b_chat,
@@ -1570,7 +1574,7 @@ def get_model_tokenizer_chatglm(model_dir: str,
     TemplateType.chatglm3,
     support_flash_attn=True,
     support_vllm=True,
-    requires=['transformers<4.42'],
+    # requires=['transformers>=4.42'],
     hf_model_id='THUDM/glm-4-9b-chat')
 @register_model(
     ModelType.glm4_9b_chat_1m,
@@ -1579,7 +1583,7 @@ def get_model_tokenizer_chatglm(model_dir: str,
     TemplateType.chatglm3,
     support_flash_attn=True,
     support_vllm=True,
-    requires=['transformers<4.42'],
+    # requires=['transformers>=4.42'],
     hf_model_id='THUDM/glm-4-9b-chat-1m')
 def get_model_tokenizer_glm4(model_dir: str,
                              torch_dtype: Dtype,
@@ -1602,7 +1606,7 @@ def get_model_tokenizer_glm4(model_dir: str,
     LoRATM.glm4v,
     TemplateType.glm4v,
     eos_token='<|endoftext|>',
-    requires=['transformers<4.42'],
+    # requires=['transformers>=4.42'],
     tags=['multi-modal', 'vision'],
     hf_model_id='THUDM/glm-4v-9b')
 def get_model_tokenizer_glm4v(model_dir: str,
@@ -1611,6 +1615,8 @@ def get_model_tokenizer_glm4v(model_dir: str,
                               load_model: bool = True,
                               **kwargs):
     model, tokenizer = get_model_tokenizer_glm4(model_dir, torch_dtype, model_kwargs, load_model, **kwargs)
+    # fix merge-lora
+    tokenizer.init_kwargs['image_size'] = 1120
     # fix device_map 4
     n_gpu = torch.cuda.device_count()
     local_world_size = get_dist_setting()[3]
@@ -1853,6 +1859,15 @@ def get_model_tokenizer_glm4v(model_dir: str,
     support_vllm=True,
     tags=['math'],
     hf_model_id='deepseek-ai/deepseek-math-7b-instruct')
+@register_model(
+    ModelType.numina_math_7b,
+    'AI-ModelScope/NuminaMath-7B-TIR',
+    LoRATM.llama,
+    TemplateType.numina_math,
+    support_flash_attn=True,
+    support_vllm=True,
+    tags=['math'],
+    hf_model_id='AI-MO/NuminaMath-7B-TIR')
 @register_model(
     ModelType.deepseek_math_7b_chat,
     'deepseek-ai/deepseek-math-7b-rl',
@@ -3617,6 +3632,85 @@ def fix_internvl_inplace_bug(model) -> None:
         embedding.forward = _new_forward
 
 
+def _patch_internvl_forward(forward_func):
+    from transformers.modeling_outputs import CausalLMOutputWithPast
+    from torch.nn import CrossEntropyLoss
+
+    def wrapper(
+        self,
+        pixel_values: torch.FloatTensor = None,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        image_flags: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        if pixel_values is None:
+            inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+            outputs = self.language_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+            logits = outputs.logits
+            loss = None
+            if labels is not None:
+                # Shift so that tokens < n predict n
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                shift_logits = shift_logits.view(-1, self.language_model.config.vocab_size)
+                shift_labels = shift_labels.view(-1)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_logits.device)
+                loss = loss_fct(shift_logits, shift_labels)
+            if return_dict:
+                output = (logits, ) + outputs[1:]
+                return (loss, ) + output if loss is not None else output
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
+        else:
+            return forward_func(
+                pixel_values,
+                input_ids,
+                attention_mask,
+                position_ids,
+                image_flags,
+                past_key_values,
+                labels,
+                use_cache,
+                output_attentions,
+                output_hidden_states,
+                return_dict,
+            )
+
+    return wrapper
+
+
+def patch_internvl_forward(model) -> None:
+    if not hasattr(model, '__old_forward'):  # Avoid double patching
+        forward = model.forward
+        model.__old_forward = forward
+        model.forward = MethodType(_patch_internvl_forward(model.forward), model)
+
+
 @register_model(
     ModelType.internvl_chat_v1_5,
     'AI-ModelScope/InternVL-Chat-V1-5',
@@ -3658,6 +3752,16 @@ def fix_internvl_inplace_bug(model) -> None:
     tags=['multi-modal', 'vision'],
     hf_model_id='OpenGVLab/Mini-InternVL-Chat-4B-V1-5')
 @register_model(
+    ModelType.internvl2_1b,
+    'OpenGVLab/InternVL2-1B',
+    LoRATM.llama,
+    TemplateType.internvl2,
+    requires=['transformers>=4.35', 'timm'],
+    support_flash_attn=True,
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision'],
+    hf_model_id='OpenGVLab/InternVL2-1B')
+@register_model(
     ModelType.internvl2_2b,
     'OpenGVLab/InternVL2-2B',
     LoRATM.internlm2,
@@ -3670,8 +3774,8 @@ def fix_internvl_inplace_bug(model) -> None:
 @register_model(
     ModelType.internvl2_4b,
     'OpenGVLab/InternVL2-4B',
-    LoRATM.internlm2,
-    TemplateType.internvl2,
+    LoRATM.phi3,
+    TemplateType.internvl2_phi3,
     requires=['transformers>=4.35', 'timm'],
     support_flash_attn=True,
     placeholder_tokens=['<IMG_CONTEXT>'],
@@ -3707,6 +3811,16 @@ def fix_internvl_inplace_bug(model) -> None:
     placeholder_tokens=['<IMG_CONTEXT>'],
     tags=['multi-modal', 'vision'],
     hf_model_id='OpenGVLab/InternVL2-40B')
+@register_model(
+    ModelType.internvl2_llama3_76b,
+    'OpenGVLab/InternVL2-Llama3-76B',
+    LoRATM.llama,
+    TemplateType.internvl2,
+    requires=['transformers>=4.35', 'timm'],
+    support_flash_attn=True,
+    placeholder_tokens=['<IMG_CONTEXT>'],
+    tags=['multi-modal', 'vision'],
+    hf_model_id='OpenGVLab/InternVL2-Llama3-76B')
 def get_model_tokenizer_internvl(model_dir: str,
                                  torch_dtype: Dtype,
                                  model_kwargs: Dict[str, Any],
@@ -3743,16 +3857,7 @@ def get_model_tokenizer_internvl(model_dir: str,
         model.config.max_position_embeddings = model.language_model.config.max_position_embeddings
         _use_submodel_func(model, 'language_model', ['get_input_embeddings', 'gradient_checkpointing_enable'])
         fix_internvl_inplace_bug(model)
-        if not hasattr(model, '__old_forward'):  # Avoid double patching
-            forward = model.forward
-            model.__old_forward = forward
-
-            @wraps(forward)
-            def _new_forward(*args, **kwargs):
-                kwargs.pop('inputs_embeds', None)
-                return forward(*args, **kwargs)
-
-            model.forward = _new_forward
+        patch_internvl_forward(model)
 
         if not hasattr(model, '__old_generate'):
             generate = model.generate
@@ -3886,7 +3991,7 @@ def get_model_tokenizer_internlm_xcomposer2(model_dir: str,
     return model, tokenizer
 
 
-def _git_clone_github(github_url: str, local_repo_name: Optional[str] = None) -> str:
+def git_clone_github(github_url: str, local_repo_name: Optional[str] = None) -> str:
     git_cache_dir = os.path.join(get_cache_dir(), '_github')
     os.makedirs(git_cache_dir, exist_ok=True)
     if local_repo_name is None:
@@ -4006,7 +4111,7 @@ def get_model_tokenizer_deepseek_vl(model_dir: str,
     if 'local_repo_path' in kwargs:
         local_repo_path = kwargs['local_repo_path']
     else:
-        local_repo_path = _git_clone_github('https://github.com/deepseek-ai/DeepSeek-VL')
+        local_repo_path = git_clone_github('https://github.com/deepseek-ai/DeepSeek-VL')
     sys.path.append(os.path.join(local_repo_path))
     from deepseek_vl.models import VLChatProcessor, MultiModalityCausalLM
     processor = VLChatProcessor.from_pretrained(model_dir)
@@ -4950,7 +5055,7 @@ def get_model_tokenizer_yi_vl(model_dir: str,
     if 'local_repo_path' in kwargs:
         local_repo_path = kwargs['local_repo_path']
     else:
-        local_repo_path = _git_clone_github('https://github.com/01-ai/Yi')
+        local_repo_path = git_clone_github('https://github.com/01-ai/Yi')
     sys.path.append(os.path.join(local_repo_path, 'VL'))
     from llava.model import LlavaLlamaForCausalLM, LlavaConfig
     from llava.model.constants import key_info
@@ -5311,10 +5416,10 @@ def get_model_tokenizer_llava(model_dir: str,
         local_repo_path = kwargs['local_repo_path']
     elif 'next' in llm_model_type:
         repo_path = 'https://github.com/LLaVA-VL/LLaVA-NeXT'
-        local_repo_path = _git_clone_github(repo_path)
+        local_repo_path = git_clone_github(repo_path)
     else:
         repo_path = 'https://github.com/haotian-liu/LLaVA'
-        local_repo_path = _git_clone_github(repo_path)
+        local_repo_path = git_clone_github(repo_path)
     sys.path.append(os.path.join(local_repo_path))
 
     if llm_model_type == 'mistral':
@@ -5395,7 +5500,7 @@ def get_model_tokenizer_mplug_owl2(model_dir: str,
     if 'local_repo_path' in kwargs:
         local_repo_path = kwargs['local_repo_path']
     else:
-        local_repo_path = _git_clone_github('https://github.com/X-PLUG/mPLUG-Owl')
+        local_repo_path = git_clone_github('https://github.com/X-PLUG/mPLUG-Owl')
     local_repo_path = os.path.join(local_repo_path, 'mPLUG-Owl2')
     sys.path.append(os.path.join(local_repo_path))
 
@@ -5467,6 +5572,8 @@ def safe_snapshot_download(model_type: str,
 
     with safe_ddp_context():
         if model_id_or_path is not None and not os.path.exists(model_id_or_path):
+            if model_id_or_path.startswith('/'):
+                raise ValueError(f"path: '{model_id_or_path}' not found")
             ignore_file_pattern = model_info['ignore_file_pattern']
             if download_model is False:
                 if ignore_file_pattern is None:

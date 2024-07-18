@@ -61,6 +61,7 @@ class TemplateType:
     internvl = 'internvl'
     internvl2 = 'internvl2'
     internvl_phi3 = 'internvl-phi3'
+    internvl2_phi3 = 'internvl2-phi3'
     florence = 'florence'
     yi = 'yi'
     yi1_5 = 'yi1_5'
@@ -73,6 +74,7 @@ class TemplateType:
     zephyr = 'zephyr'
     sus = 'sus'
     deepseek = 'deepseek'
+    numina_math = 'numina-math'
     deepseek_coder = 'deepseek-coder'
     deepseek_vl = 'deepseek-vl'
     deepseek2 = 'deepseek2'
@@ -171,7 +173,8 @@ class Template:
                  system_prefix: Optional[Prompt] = None,
                  auto_add_bos: bool = False,
                  tools_prompt: str = 'react_en',
-                 tool_prompt: Optional[Prompt] = None) -> None:
+                 tool_prompt: Optional[Prompt] = None,
+                 padding_side: Literal['left', 'right'] = 'right') -> None:
         # check
         for x in [prefix, prompt, chat_sep, suffix, system_prefix]:
             assert x is None or isinstance(x, list)
@@ -197,6 +200,7 @@ class Template:
         self.tools_prompt = tools_prompt
         self.tool_prompt = tool_prompt if tool_prompt is not None else self.prompt  # default as user
         self._is_vllm = False
+        self.padding_side = padding_side
 
     @staticmethod
     def _replace_system(prefix: Prompt) -> Prompt:
@@ -608,6 +612,25 @@ class Template:
     def _concat_tokenizer_kwargs(self, tokenizer_kwargs: Dict[str, Any], curr_tokenizer_kwargs: Dict[str, Any]) -> None:
         assert len(tokenizer_kwargs) == 0
 
+    @staticmethod
+    def pad_sequence(sequences: List[Tensor],
+                     padding_value: float = 0.,
+                     padding_side: Literal['right', 'left'] = 'right'):
+        padding_right = padding_side == 'right'
+        if padding_right:
+            return pad_sequence(sequences, batch_first=True, padding_value=padding_value)
+
+        max_len = max([s.size(0) for s in sequences])
+
+        padded_sequences = []
+        for seq in sequences:
+            pad_length = max_len - seq.size(0)
+            pad_tuple = [0] * ((seq.dim() - 1) * 2) + [pad_length, 0]
+            padded_seq = F.pad(seq, tuple(pad_tuple), 'constant', padding_value)
+            padded_sequences.append(padded_seq)
+
+        return torch.stack(padded_sequences)
+
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
         """
         Args:
@@ -628,36 +651,49 @@ class Template:
             attention_mask = [torch.ones(len(input_ids[i]), dtype=torch.int64) for i in range(len(input_ids))]
         labels = [torch.tensor(b['labels']) for b in batch]
         loss_scale = [torch.tensor(b['loss_scale']) for b in batch] if 'loss_scale' in batch[0] else None
+        padding_right = self.padding_side == 'right'
 
         if padding_to is not None:
             assert input_ids is not None  # inputs_embeds not support padding_to
             padding_len = padding_to - input_ids[0].shape[-1]
             if padding_len > 0:
-                input_ids[0] = F.pad(input_ids[0], (0, padding_len), 'constant', tokenizer.pad_token_id)
-                attention_mask[0] = F.pad(attention_mask[0], (0, padding_len), 'constant', 0)
-                labels[0] = F.pad(labels[0], (0, padding_len), 'constant', -100)
+                input_ids[0] = F.pad(input_ids[0], (0, padding_len) if padding_right else (padding_len, 0), 'constant',
+                                     tokenizer.pad_token_id)
+                attention_mask[0] = F.pad(attention_mask[0], (0, padding_len) if padding_right else (padding_len, 0),
+                                          'constant', 0)
+                labels[0] = F.pad(labels[0], (0, padding_len) if padding_right else (padding_len, 0), 'constant', -100)
                 if loss_scale:
-                    loss_scale[0] = F.pad(loss_scale[0], (0, padding_to - labels[0].shape[-1]), 'constant', 0.)
+                    loss_scale[0] = F.pad(loss_scale[0], (0, padding_to - labels[0].shape[-1]) if padding_right else
+                                          (padding_to - labels[0].shape[-1], 0), 'constant', 0.)
 
         if input_ids is None:
-            inputs_embeds = pad_sequence(inputs_embeds, batch_first=True, padding_value=0)
+            inputs_embeds = self.pad_sequence(inputs_embeds, 0, self.padding_side)
         else:
-            input_ids = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id)
-        attention_mask = pad_sequence(attention_mask, batch_first=True, padding_value=0)
+            input_ids = self.pad_sequence(input_ids, tokenizer.pad_token_id, self.padding_side)
+        attention_mask = self.pad_sequence(attention_mask, 0, self.padding_side)
         if loss_scale:
-            loss_scale = pad_sequence(loss_scale, batch_first=True, padding_value=0.)
-        labels = pad_sequence(labels, batch_first=True, padding_value=-100)
+            loss_scale = self.pad_sequence(loss_scale, 0., self.padding_side)
+        labels = self.pad_sequence(labels, -100, self.padding_side)
 
         if use_torchacc():
             rank, _, world_size, _ = get_dist_setting()
-            input_ids, attention_mask, labels, loss_scale = pad_and_split_batch(padding_to, input_ids, attention_mask,
-                                                                                labels, loss_scale, self.max_length,
-                                                                                self.tokenizer, rank, world_size)
+            input_ids, attention_mask, labels, loss_scale = pad_and_split_batch(
+                padding_to,
+                input_ids,
+                attention_mask,
+                labels,
+                loss_scale,
+                self.max_length,
+                self.tokenizer,
+                rank,
+                world_size,
+                padding_right=padding_right)
         if input_ids is not None:
             bs, seq_len = input_ids.shape
             position_ids = torch.arange(seq_len).unsqueeze(0).long().repeat(bs, 1)
 
             if self.sequence_parallel_size > 1:
+                assert padding_right or bs == 1, 'Sequence parallel only support padding_side=right'
                 from swift.trainers.xtuner import get_xtuner_sequence_parallel_world_size
                 if get_xtuner_sequence_parallel_world_size() > 1:
                     from swift.trainers.xtuner import pad_and_split_for_sequence_parallel
@@ -1094,6 +1130,10 @@ register_template(
     Template([['bos_token_id']], ['User: {{QUERY}}\n\nAssistant:'], [['eos_token_id']], [['eos_token_id']], None,
              [['bos_token_id'], '{{SYSTEM}}\n\n']))
 register_template(
+    TemplateType.numina_math,
+    Template([['bos_token_id']], ['### Problem: {{QUERY}}\n### Solution: '], ['\n'], [['eos_token_id']], None,
+             [['bos_token_id'], '{{SYSTEM}}']))
+register_template(
     TemplateType.deepseek2,
     Template([[100000]], ['User: {{QUERY}}\n\nAssistant:'], [[100001]], [[100001]], None, [[100000], '{{SYSTEM}}\n\n']))
 
@@ -1284,7 +1324,7 @@ class InternLMXComposer2Template(Template):
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
         res = super().data_collator(batch, padding_to)
         im_mask = [b['im_mask'][0] for b in batch]
-        im_mask = pad_sequence(im_mask, batch_first=True, padding_value=0)
+        im_mask = self.pad_sequence(im_mask, 0, self.padding_side)
         res['im_mask'] = im_mask
         return res
 
@@ -1329,8 +1369,10 @@ class InternvlTemplate(Template):
     num_image_token = 256
 
     def __init__(self):
-        super().__init__(['<s>'], ['<|im_start|>user\n{{QUERY}}<|im_end|><|im_start|>assistant\n'], ['<|im_end|>'],
-                         ['<|im_end|>'], self.system, ['<s><|im_start|>system\n{{SYSTEM}}<|im_end|>'])
+        super().__init__([], ['<|im_start|>user\n{{QUERY}}<|im_end|><|im_start|>assistant\n'], ['<|im_end|>'],
+                         ['<|im_end|>'],
+                         self.system, ['<|im_start|>system\n{{SYSTEM}}<|im_end|>'],
+                         auto_add_bos=True)
 
     def replace_tag(self, media_type, index, example) -> List[Context]:
         assert media_type == 'image'
@@ -1344,14 +1386,11 @@ class InternvlTemplate(Template):
         idx_list = _findall(input_ids, -100)
         labels = inputs.get('labels')
         images_path = example.get('images') or []
-        if images_path:
-            from .vision_utils import load_image
-
-            pixel_values = []
-            if isinstance(images_path, str):
-                images_path = [images_path]
-            for image_path in images_path:
-                pixel_values.append(load_image(image_path))
+        if isinstance(images_path, str):
+            images_path = [images_path]
+        from .vision_utils import load_image
+        pixel_values = _read_batch(images_path, load_image)
+        if pixel_values:
             pixel_values = torch.cat(pixel_values, dim=0)
             image_bs = pixel_values.shape[0]
 
@@ -1372,10 +1411,10 @@ class InternvlTemplate(Template):
 
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
         res = super().data_collator(batch, padding_to)
-        assert all('pixel_values' in b for b in batch), 'Temporarily, Interval only supports data with images'
-        image_flags = [b['image_flags'] for b in batch if 'image_flags' in b]
-        if image_flags:
-            res['image_flags'] = torch.concat(image_flags)
+        if any('pixel_values' in b for b in batch):
+            image_flags = [b['image_flags'] for b in batch if 'image_flags' in b]
+            if image_flags:
+                res['image_flags'] = torch.concat(image_flags)
         return res
 
     @staticmethod
@@ -1386,6 +1425,13 @@ class InternvlTemplate(Template):
 class Internvl2Template(InternvlTemplate):
 
     video_segments = 8
+
+    def __init__(self):
+        self.system = '你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。'
+        Template.__init__(
+            self, [], ['<|im_start|>user\n{{QUERY}}<|im_end|><|im_start|>assistant\n'], ['<|im_end|>'], ['<|im_end|>'],
+            self.system, ['<|im_start|>system\n{{SYSTEM}}<|im_end|>'],
+            auto_add_bos=True)
 
     def replace_tag(self, media_type, index, example) -> List[Context]:
         if media_type == 'image':
@@ -1399,23 +1445,30 @@ class Internvl2Template(InternvlTemplate):
             return context_list
 
     def encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        example = example.copy()
+        history = example.pop('history', None)
+        if history is None:
+            history = []
+        example['query'], example['history'], images_path = replace_img_tag(example['query'], history, '<image>')
+        if images_path and example.get('images'):
+            example['images'].extend(images_path)
         inputs, _ = super(InternvlTemplate, self).encode(example)
         if len(inputs) == 0:
             return inputs, {}
         input_ids = inputs['input_ids']
         idx_list = _findall(input_ids, -100)
         labels = inputs.get('labels')
-        images_path = example.get('images') or []
         videos_path = example.get('videos') or []
-        if images_path:
-            from .vision_utils import load_image
-            pixel_values = []
-            if isinstance(images_path, str):
-                images_path = [images_path]
-            for image_path in images_path:
-                pixel_values.append(load_image(image_path))
-
-            assert len(images_path) == len(idx_list)
+        if isinstance(images_path, str):
+            images_path = [images_path]
+        if isinstance(videos_path, str):
+            videos_path = [videos_path]
+        from .vision_utils import load_image, load_video
+        pixel_values_images = _read_batch(images_path, load_image)
+        videos_path = [path for path in videos_path if path is not None]
+        if pixel_values_images:
+            pixel_values = pixel_values_images
+            assert len(pixel_values) == len(idx_list)
             added_tokens_len = 0
             patches = 0
             for idx, pv in zip(idx_list, pixel_values):
@@ -1432,11 +1485,8 @@ class Internvl2Template(InternvlTemplate):
             inputs['labels'] = labels
             inputs['pixel_values'] = torch.cat(pixel_values).to(self.model.dtype)
             inputs['image_flags'] = torch.ones(patches)
-        if videos_path:
-            if not isinstance(videos_path, (list, tuple)):
-                videos_path = [videos_path]
+        elif videos_path:
             assert len(videos_path) == 1
-            from swift.llm.utils.vision_utils import load_video
             pixel_values, num_patches = load_video(videos_path[0], num_segments=self.video_segments)
             assert len(num_patches) == len(idx_list)
             added_tokens_len = 0
@@ -1455,46 +1505,69 @@ class Internvl2Template(InternvlTemplate):
         inputs.pop('loss_scale', None)
         return inputs, {}
 
-    def __init__(self):
-        self.system = '你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。'
-        Template.__init__(self, [], ['<|im_start|>user\n{{QUERY}}<|im_end|><|im_start|>assistant\n'], ['<|im_end|>'],
-                          ['<|im_end|>'], self.system, ['<|im_start|>system\n{{SYSTEM}}<|im_end|>'])
+    def add_default_tags(self, example: Dict[str, Any]) -> None:
+        history: History = deepcopy(example.get('history') or [])
+        query: str = example.get('query') or ''
+        for media_key, media_tag in [('videos', '<video_label>'), ('images', '<image>')]:
+            medias = example.get(media_key)
+            if medias:
+                num_media_tag = len(re.findall(media_tag, '\n'.join([h[0] for h in history]) + f'\n{query}'))
+                num_media = sum([1 for m in medias if m])  # ignore None
+                num_res_media = num_media - num_media_tag
+                assert num_res_media >= 0, \
+                    'The number of media tags {num_media_tag} is greater than the number of media objects {num_media}.'
+                if num_res_media == 0:
+                    # Each media tag corresponds to an media object.
+                    return
+                # process res media, add default media tag
+                if num_res_media == len(history) + 1:
+                    # In this case, add at the beginning of each round's query.
+                    for h, m in zip(history, example[media_key][:-1]):
+                        if m:
+                            h[0] = media_tag + h[0]
+                    if example[media_key][-1]:
+                        query = media_tag + query
+                    example[media_key] = [m for m in example[media_key] if m]
+                else:
+                    # add the res image tag at the beginning of the last query
+                    query = media_tag * num_res_media + query
+                break
+
+        example['query'] = query
+        example['history'] = history
 
 
 class InternvlPhi3Template(InternvlTemplate):
     system = 'You are an AI assistant whose name is Phi-3.'
 
     def __init__(self):
-        Template.__init__(self, ['<s>'], ['<|user|>\n{{QUERY}}<|end|>\n<|assistant|>\n'], ['<|end|>\n'], ['<|end|>'],
-                          self.system, ['<s><|system|>\n{{SYSTEM}}<|end|>\n'])
+        Template.__init__(
+            self, [], ['<|user|>\n{{QUERY}}<|end|><|assistant|>\n'], ['<|end|>\n'], ['<|end|>'],
+            self.system, ['<|system|>\n{{SYSTEM}}<|end|>'],
+            auto_add_bos=True)
+
+
+class Internvl2Phi3Template(Internvl2Template):
+    system = '你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。'
+
+    def __init__(self):
+        Template.__init__(
+            self, [], ['<|user|>\n{{QUERY}}<|end|><|assistant|>\n'], ['<|end|>'], ['<|end|>'],
+            self.system, ['<|system|>\n{{SYSTEM}}<|end|>'],
+            auto_add_bos=True)
 
 
 register_template(
-    TemplateType.internvl,
-    InternvlTemplate(),
-    use_model=True,
-    lazy_tokenize=True,
-    infer_media_type='dialogue',
-    dataloader_num_workers=0,
-    dataloader_pin_memory=False)
+    TemplateType.internvl, InternvlTemplate(), use_model=True, lazy_tokenize=True, infer_media_type='dialogue')
 
 register_template(
-    TemplateType.internvl_phi3,
-    InternvlPhi3Template(),
-    use_model=True,
-    lazy_tokenize=True,
-    infer_media_type='dialogue',
-    dataloader_num_workers=0,
-    dataloader_pin_memory=False)
+    TemplateType.internvl_phi3, InternvlPhi3Template(), use_model=True, lazy_tokenize=True, infer_media_type='dialogue')
 
 register_template(
-    TemplateType.internvl2,
-    Internvl2Template(),
-    use_model=True,
-    lazy_tokenize=True,
-    infer_media_type='dialogue',
-    dataloader_num_workers=0,
-    dataloader_pin_memory=False)
+    TemplateType.internvl2, Internvl2Template(), use_model=True, lazy_tokenize=True, infer_media_type='round')
+
+register_template(
+    TemplateType.internvl2_phi3, Internvl2Phi3Template(), use_model=True, lazy_tokenize=True, infer_media_type='round')
 
 
 class FlorenceTemplate(Template):
@@ -1598,8 +1671,8 @@ class FlorenceTemplate(Template):
             return {}, {}
         inputs['input_ids'] = inputs['input_ids'][:self.max_length]
         inputs['attention_mask'] = inputs['attention_mask'][:self.max_length]
-        if inputs['labels'] is not None:
-            labels = labels[:self.max_length]
+        if inputs.get('labels'):
+            inputs['labels'] = inputs['labels'][:self.max_length]
 
         return inputs, {}
 
@@ -1656,6 +1729,10 @@ register_template(
 
 class LlavaHfTemplate(Template):
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.padding_side = 'left'
+
     def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index, example) -> List[Context]:
         assert media_type == 'image'
         if self._is_vllm:
@@ -1675,7 +1752,7 @@ class LlavaHfTemplate(Template):
             images = self._prepare_vllm_images(images)
         if images:
             image_inputs = image_processor(images, return_tensors='pt').to(self.model.dtype)
-            inputs['pixel_values'] = image_inputs['pixel_values']
+            inputs['pixel_values'] = image_inputs['pixel_values'].squeeze(0)
             if 'image_sizes' in image_inputs:
                 inputs['image_sizes'] = image_inputs['image_sizes']
         return inputs, {}
@@ -1893,7 +1970,7 @@ class PaliGemmaTemplate(Template):
     def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
         res = super().data_collator(batch, padding_to)
         token_type_ids = [torch.tensor(b['token_type_ids']) for b in batch]
-        token_type_ids = pad_sequence(token_type_ids, batch_first=True, padding_value=0)
+        token_type_ids = self.pad_sequence(token_type_ids, 0, self.padding_side)
         res['token_type_ids'] = token_type_ids
         return res
 
@@ -2132,7 +2209,7 @@ class CogTemplate(Template):
             if key in batch[0]:
                 res[key] = [b[key][0] for b in batch]
         token_type_ids = [torch.tensor(b['token_type_ids']) for b in batch]
-        token_type_ids = pad_sequence(token_type_ids, batch_first=True, padding_value=0)
+        token_type_ids = self.pad_sequence(token_type_ids, 0, self.padding_side)
         res['token_type_ids'] = token_type_ids
         return res
 
