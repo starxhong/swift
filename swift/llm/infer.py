@@ -307,6 +307,10 @@ def llm_infer(args: InferArguments) -> Dict[str, List[Dict[str, Any]]]:
     jsonl_path = None
     if args.save_result:
         result_dir = args.ckpt_dir
+        if args.result_dir:
+            result_dir = args.result_dir
+        else:
+            result_dir = args.ckpt_dir
         if result_dir is None:
             result_dir = llm_engine.model_dir if args.infer_backend == 'vllm' else model.model_dir
         if result_dir is not None:
