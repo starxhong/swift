@@ -3,7 +3,7 @@ def test_vllm_vlm():
     import vllm
     from packaging import version
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    assert version.parse('0.5.0') <= version.parse(vllm.__version__) < version.parse('0.5.1')
+    assert version.parse(vllm.__version__) >= version.parse('0.5.1')
     from swift.llm import (ModelType, get_vllm_engine, get_default_template_type, get_template, inference_vllm,
                            inference_stream_vllm)
 
@@ -13,6 +13,7 @@ def test_vllm_vlm():
     template = get_template(template_type, llm_engine.hf_tokenizer)
     # 与`transformers.GenerationConfig`类似的接口
     llm_engine.generation_config.max_new_tokens = 256
+    llm_engine.generation_config.logprobs = 2
     generation_info = {}
 
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png']
@@ -21,6 +22,7 @@ def test_vllm_vlm():
     for request, resp in zip(request_list, resp_list):
         print(f"query: {request['query']}")
         print(f"response: {resp['response']}")
+        print(f"len(logprobs): {len(resp['logprobs'])}")
     print(generation_info)
 
     # stream
@@ -41,9 +43,10 @@ def test_vllm_vlm():
     history = resp_list[0]['history']
     print(f'history: {history}')
     print(generation_info)
+    print(f"len(logprobs): {len(resp_list[0]['logprobs'])}")
 
     # batched
-    n_batched = 100
+    n_batched = 1000
     images = ['http://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/animal.png']
     request_list = [{'query': 'Describe this image.', 'images': images} for i in range(n_batched)]
     resp_list = inference_vllm(llm_engine, template, request_list, generation_info=generation_info, use_tqdm=True)

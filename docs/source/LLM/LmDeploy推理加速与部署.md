@@ -1,7 +1,7 @@
 # LmDeploy推理加速与部署
 lmdeploy github: [https://github.com/InternLM/lmdeploy](https://github.com/InternLM/lmdeploy).
 
-支持lmdeploy推理加速的模型可以查看[支持的模型](支持的模型和数据集.md#模型).
+支持lmdeploy推理加速的模型可以查看[支持的模型](../Instruction/支持的模型和数据集.md#模型).
 
 ## 目录
 - [环境准备](#环境准备)
@@ -37,7 +37,8 @@ from swift.llm import (
 )
 
 model_type = ModelType.qwen_7b_chat
-lmdeploy_engine = get_lmdeploy_engine(model_type)
+model_id_or_path = None
+lmdeploy_engine = get_lmdeploy_engine(model_type, model_id_or_path=model_id_or_path)
 template_type = get_default_template_type(model_type)
 template = get_template(template_type, lmdeploy_engine.hf_tokenizer)
 # 与`transformers.GenerationConfig`类似的接口
@@ -95,7 +96,8 @@ from swift.llm import (
 
 if __name__ == '__main__':
     model_type = ModelType.qwen2_7b_instruct
-    lmdeploy_engine = get_lmdeploy_engine(model_type, tp=2)
+    model_id_or_path = None
+    lmdeploy_engine = get_lmdeploy_engine(model_type, model_id_or_path=model_id_or_path, tp=2)
     template_type = get_default_template_type(model_type)
     template = get_template(template_type, lmdeploy_engine.hf_tokenizer)
     # 与`transformers.GenerationConfig`类似的接口
@@ -178,6 +180,8 @@ CUDA_VISIBLE_DEVICES=0,1 swift deploy --model_type qwen2-72b-instruct --infer_ba
 ```
 
 客户端调用方式可以查看: [vLLM推理加速与部署文档](VLLM推理加速与部署.md#部署)
+
+benchmark测试代码: https://github.com/modelscope/ms-swift/blob/main/scripts/benchmark/deploy.py
 
 ## 多模态
 查看[这里](../Multi-Modal/LmDeploy推理加速文档.md)

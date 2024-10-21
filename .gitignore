@@ -1,4 +1,6 @@
 # Byte-compiled / optimized / DLL files
+tmp
+*.ttf
 __pycache__/
 *.py[cod]
 *$py.class
@@ -107,6 +109,7 @@ venv.bak/
 
 .vscode
 .idea
+.run
 
 # custom
 *.pkl
@@ -126,6 +129,11 @@ result.jpg
 result.mp4
 output/
 *.out
+benchmarks/
+eval_outputs/
+transformers/
+vlmeval/
+my_model/
 
 # Pytorch
 *.pth

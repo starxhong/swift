@@ -186,7 +186,6 @@ Multimodal large model fine-tuning usually uses **custom datasets** for fine-tun
 
 LoRA fine-tuning:
 
-(By default, only the qkv of the LLM part is fine-tuned using LoRA. If you want to fine-tune all linear layers including the vision model part, you can specify `--lora_target_modules ALL`.)
 ```shell
 # Experimental environment: A10, 3090, V100...
 # 21GB GPU memory
@@ -217,7 +216,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 swift sft \
     --sft_type full \
 ```
 
-[Custom datasets](../LLM/Customization.md#-Recommended-Command-line-arguments) support json, jsonl formats. Here is an example of a custom dataset:
+[Custom datasets](../Instruction/Customization.md#-Recommended-Command-line-arguments) support json, jsonl formats. Here is an example of a custom dataset:
 
 (Supports multi-turn dialogues, where each turn can contain multiple images or no images, and supports passing in local paths or URLs)
 

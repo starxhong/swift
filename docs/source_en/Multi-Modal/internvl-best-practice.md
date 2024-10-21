@@ -27,7 +27,7 @@ This issue often arises when attempting to use the mini-internvl or InternVL2 mo
 The auto device map algorithm in transformers is not friendly to multi-modal models, which may result in uneven memory allocation across different GPU cards.
 
 - You can set the memory usage for each card using the `--device_max_memory parameter`, for example, in a four-card environment, you can set `--device_max_memory 15GB 15GB 15GB 15GB`.
-- Alternatively, you can explicitly specify the device map using `--device_map_config_path`.
+- Alternatively, you can explicitly specify the device map using `--device_map_config`.
 
 3. **Differences between the InternVL2 model and its predecessors (InternVL-V1.5 and Mini-InternVL)**
 
@@ -262,7 +262,6 @@ LoRA fine-tuning:
 
 **note**
 - If your GPU does not support flash attention, use the argument --use_flash_attn false.
-- By default, only the qkv of the LLM part is fine-tuned using LoRA. If you want to fine-tune all linear layers including the vision model part, you can specify `--lora_target_modules ALL`.
 
 ```shell
 # Experimental environment: A100
@@ -304,7 +303,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 swift sft \
 ```
 
 ### Custom Dataset
-[Custom datasets](../LLM/Customization.md#-Recommended-Command-line-arguments) support json, jsonl formats. Here is an example of a custom dataset:
+[Custom datasets](../Instruction/Customization.md#-Recommended-Command-line-arguments) support json, jsonl formats. Here is an example of a custom dataset:
 
 Supports multi-turn conversations, Images support for local path or URL input, multiple images separated by commas ','
 
@@ -339,7 +338,8 @@ The **InternVL2** model supports training with video datasets without the need t
 The **InternVL2** model supports training for grounding tasks, with data referenced in the following format:
 ```jsonl
 {"query": "Find <bbox>", "response": "<ref-object>", "images": ["/coco2014/train2014/COCO_train2014_000000001507.jpg"], "objects": "[{\"caption\": \"guy in red\", \"bbox\": [138, 136, 235, 359], \"bbox_type\": \"real\", \"image\": 0}]" }
-{"query": "Find <ref-object>", "response": "<bbox>", "images": ["/coco2014/train2014/COCO_train2014_000000001507.jpg"], "objects": "[{\"caption\": \"guy in red\", \"bbox\": [138, 136, 235, 359], \"bbox_type\": \"real\", \"image\": 0}]" }
+# mapping to multiple bboxes
+{"query": "Find <ref-object>", "response": "<bbox>", "images": ["/coco2014/train2014/COCO_train2014_000000001507.jpg"], "objects": "[{\"caption\": \"guy in red\", \"bbox\": [[138, 136, 235, 359],[1,2,3,4]], \"bbox_type\": \"real\", \"image\": 0}]" }
 ```
 The `objects` field contains a JSON string with four fields:
   1. **caption**: Description of the object corresponding to the bounding box.
@@ -349,7 +349,7 @@ The `objects` field contains a JSON string with four fields:
 
 This format will be converted to a format recognizable by InternVL2, specifically:
 ```json
-{"query": "Find <ref>the man</ref>", "response": "<box> [[200, 200, 600, 600]] </box>"}
+{"query": "Find <ref>the man</ref>", "response": "<box> [[200, 200, 600, 600]] </box>", "images": ["image_path1"]}
 ```
 You can also directly input the above format, but please ensure that the coordinates use thousandth-scale coordinates.
 

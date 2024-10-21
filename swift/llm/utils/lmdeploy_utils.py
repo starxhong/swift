@@ -5,32 +5,61 @@ import os
 import time
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
+from functools import wraps
 from queue import Queue
 from threading import Thread
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
-from lmdeploy import EngineGenerationConfig as _LmdeployGenerationConfig
 from lmdeploy import PytorchEngineConfig, TurbomindEngineConfig, VisionConfig, pipeline
 from lmdeploy.api import autoget_backend_config
 from lmdeploy.serve.async_engine import AsyncEngine
 from lmdeploy.serve.vl_async_engine import VLAsyncEngine
 from tqdm import tqdm
-from transformers import AutoConfig, GenerationConfig
+from transformers import AutoConfig, AutoTokenizer, GenerationConfig
 
-from swift.utils import get_logger
+from swift.utils import get_logger, get_seed
 from .argument import InferArguments
 from .model import get_model_tokenizer
 from .template import Template, get_template
 from .utils import get_max_model_len
 
+try:
+    from lmdeploy import EngineGenerationConfig as _LmdeployGenerationConfig
+except ImportError:
+    # lmdeploy removed EngineGenerationConfig after v0.6.0
+    from lmdeploy import GenerationConfig as _LmdeployGenerationConfig
+
 logger = get_logger()
+
+
+@contextmanager
+def _patch_pipeline(tokenizer):
+    _old_from_pretrained = AutoTokenizer.from_pretrained
+
+    @wraps(_old_from_pretrained)
+    def _from_pretrained(self, *args, **kwargs):
+        return tokenizer
+
+    AutoTokenizer.from_pretrained = _from_pretrained
+
+    from lmdeploy.serve import async_engine
+    _old_best_match_model = async_engine.best_match_model
+
+    def _best_match_model(query: str) -> Optional[str]:
+        return tokenizer.model_type
+
+    async_engine.best_match_model = _best_match_model
+    yield
+    AutoTokenizer.from_pretrained = _old_from_pretrained
+    async_engine.best_match_model = _old_best_match_model
 
 
 def get_lmdeploy_engine(
         model_type: str,
         # TODO: https://github.com/InternLM/lmdeploy/issues/1846
-        # torch_dtype: Optional[Dtype] = None,
+        # torch_dtype: Optional[torch.dtype] = None,
         *,
         model_id_or_path: Optional[str] = None,
         revision: Optional[str] = None,
@@ -69,7 +98,9 @@ def get_lmdeploy_engine(
         pipeline_kwargs['vision_config'] = vision_config
         logger.info(f'vision_config: {vision_config}')
 
-    lmdeploy_engine = pipeline(model_dir, backend_config=backend_config, **pipeline_kwargs)
+    with _patch_pipeline(tokenizer):
+        lmdeploy_engine = pipeline(model_dir, backend_config=backend_config, **pipeline_kwargs)
+
     lmdeploy_engine.model_dir = model_dir
     lmdeploy_engine.model_type = model_type
     lmdeploy_engine.is_multimodal = is_multimodal
@@ -81,9 +112,11 @@ def get_lmdeploy_engine(
     if os.path.isfile(generation_config_path):
         generation_config = GenerationConfig.from_pretrained(model_dir)
         kwargs = generation_config.to_dict()
+        if kwargs.get('max_new_tokens') is None:
+            kwargs.pop('max_new_tokens', None)
         parameters = inspect.signature(LmdeployGenerationConfig.__init__).parameters
-        for k in kwargs.copy().keys():
-            if k not in parameters:
+        for k, v in kwargs.copy().items():
+            if k not in parameters or v is None:
                 kwargs.pop(k)
         lmdeploy_engine.generation_config = LmdeployGenerationConfig(**kwargs)
     else:
@@ -92,40 +125,40 @@ def get_lmdeploy_engine(
     return lmdeploy_engine
 
 
-@contextmanager
-def lmdeploy_context(self: Template):
-    self._is_lmdeploy = True
-    yield
-    self._is_lmdeploy = False
-
-
+@dataclass
 class LmdeployGenerationConfig(_LmdeployGenerationConfig):
+    max_new_tokens: int = 64
+    temperature: float = 1.
+    top_k: int = 50  # -1: all
+    top_p: float = 1.
+    repetition_penalty: float = 1.
 
-    def __init__(
-        self,
-        max_new_tokens: Optional[int] = 64,
-        temperature: float = 1.,
-        top_k: int = 50,  # -1: all
-        top_p: float = 1.,
-        repetition_penalty: float = 1.,
-        *,
-        n: int = 1,
-        stop_words: Optional[List[int]] = None,
-        skip_special_tokens: bool = False,
-        **kwargs,
-    ) -> None:
-        if stop_words is None:
-            stop_words = []
-        super().__init__(
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            n=n,
-            stop_words=stop_words,
-            skip_special_tokens=skip_special_tokens,
-            **kwargs)
+    n: int = 1
+    stop_words: Optional[List[int]] = None
+    logprobs: Optional[int] = None
+    random_seed: Optional[int] = None
+    skip_special_tokens: bool = False
+    do_sample: bool = True  # compat lmdeploy==0.6
+
+    def __post_init__(self):
+        if self.stop_words is None:
+            self.stop_words = []
+        self._temperature = self.temperature
+
+        super().__post_init__()
+
+    def __setattr__(self, key: str, value: str) -> None:
+        if key == 'max_length':
+            raise ValueError('`max_length` is not supported, please use `max_new_tokens` for setting.')
+
+        if key == 'do_sample' and hasattr(self, '_temperature'):
+            assert value in {True, False}
+            super().__setattr__('temperature', self._temperature if value else 0)
+        elif key == 'temperature':
+            self._temperature = value
+        elif key == 'stop_words' and hasattr(self, 'stop_token_ids'):  # compat lmdeploy==0.6
+            self.stop_token_ids = value
+        super().__setattr__(key, value)
 
 
 def _add_stop_word(stop_words: List[int], token: Union[List[int], int, str, None], tokenizer=None) -> None:
@@ -150,7 +183,8 @@ def _prepare_lmdeploy_request(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine]
                               use_tqdm: bool = False,
                               **kwargs):
     for key in ['num_prompt_tokens', 'num_generated_tokens', 'num_samples']:
-        generation_info[key] = 0
+        if key not in generation_info:
+            generation_info[key] = 0
 
     if hasattr(lmdeploy_engine, 'vl_encoder'):
         lmdeploy_engine.vl_encoder._loop_task = None
@@ -160,6 +194,8 @@ def _prepare_lmdeploy_request(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine]
 
     _add_stop_word(generation_config.stop_words, tokenizer.eos_token_id, tokenizer=tokenizer)
     _add_stop_word(generation_config.stop_words, template.suffix[-1], tokenizer=tokenizer)
+    if generation_config.random_seed is None:
+        generation_config.random_seed = get_seed()
 
     resp_list: List[Optional[Dict[str, Any]]] = [None] * len(request_list)
     generators = []
@@ -177,7 +213,7 @@ def _prepare_lmdeploy_request(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine]
         prog_bar.update()
         return inputs
 
-    with lmdeploy_context(template), concurrent.futures.ThreadPoolExecutor(
+    with template.lmdeploy_context(), concurrent.futures.ThreadPoolExecutor(
             max_workers=min(max_workers, len(request_list))) as executor:
         futures = [executor.submit(_prepare_inputs, request) for request in request_list]
         concurrent.futures.wait(futures)
@@ -206,11 +242,15 @@ def inference_stream_lmdeploy(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine]
                               generation_info: Optional[Dict[str, Any]] = None,
                               use_tqdm: bool = False,
                               **kwargs) -> Iterator[List[Dict[str, Any]]]:
+    """
+    request_list: e.g. [{'query': 'hello!'}].
+        The keys that can be included are: 'query', 'history', 'system', 'images'.
+    """
     if len(request_list) == 0:
         return
     start_runtime = time.perf_counter()
     if generation_config is None:
-        generation_config = getattr(lmdeploy_engine, 'generation_config', LmdeployGenerationConfig())
+        generation_config = getattr(lmdeploy_engine, 'generation_config', None) or LmdeployGenerationConfig()
     assert isinstance(generation_config, LmdeployGenerationConfig)
     request_list = deepcopy(request_list)
     generation_config = deepcopy(generation_config)
@@ -265,6 +305,7 @@ def inference_stream_lmdeploy(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine]
             output = outputs[i]  # old value
         outputs[i] = output
         request = request_list[i]
+        logprobs = output.logprobs
         safe_response = template.generate_ids_to_response(output.token_ids, is_finished, print_idx=print_idx_list[i])
         query = request['query']
         history = request['history']
@@ -275,6 +316,8 @@ def inference_stream_lmdeploy(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine]
         generation_info['num_generated_tokens'] += n_gen_tokens - num_generated_tokens[i]
         num_generated_tokens[i] = n_gen_tokens
         resp_list[i] = {'response': safe_response, 'history': history}
+        if logprobs is not None:
+            resp_list[i]['logprobs'] = logprobs
 
         runtime = time.perf_counter() - start_runtime
         generation_info['runtime'] = runtime
@@ -291,23 +334,58 @@ def inference_lmdeploy(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine],
                        *,
                        generation_config: Optional[LmdeployGenerationConfig] = None,
                        generation_info: Optional[Dict[str, Any]] = None,
+                       max_batch_size: Optional[int] = None,
                        use_tqdm: bool = False,
                        verbose: bool = False,
                        prompt_prefix: str = '[PROMPT]',
                        output_prefix: str = '[OUTPUT]',
                        **kwargs) -> List[Dict[str, Any]]:
+    """
+    request_list: e.g. [{'query': 'hello!'}].
+        The keys that can be included are: 'query', 'history', 'system', 'images'.
+    """
     if len(request_list) == 0:
         return []
     runtime = time.perf_counter()
+
+    is_multimodal = getattr(lmdeploy_engine, 'is_multimodal', False)
+    if is_multimodal and max_batch_size is None:
+        max_batch_size = 512
+
+    _inner_call = kwargs.get('_inner_call', False)
+    if generation_info is None:
+        generation_info = {}
+    elif not _inner_call:
+        generation_info.clear()
+    if max_batch_size is not None and len(request_list) > max_batch_size:
+        i = 0
+        resp_list = []
+        kwargs['_inner_call'] = True
+        while i < len(request_list):
+            resp_list += inference_lmdeploy(
+                lmdeploy_engine,
+                template,
+                request_list[i:i + max_batch_size],
+                generation_config=generation_config,
+                generation_info=generation_info,
+                max_batch_size=max_batch_size,
+                use_tqdm=use_tqdm,
+                verbose=verbose,
+                prompt_prefix=prompt_prefix,
+                output_prefix=output_prefix,
+                **kwargs)
+            i += max_batch_size
+        runtime = time.perf_counter() - runtime
+        generation_info['runtime'] = runtime
+        generation_info['samples/s'] = generation_info['num_samples'] / runtime
+        generation_info['tokens/s'] = generation_info['num_generated_tokens'] / runtime
+        return resp_list
+
     if generation_config is None:
-        generation_config = getattr(lmdeploy_engine, 'generation_config', LmdeployGenerationConfig())
+        generation_config = getattr(lmdeploy_engine, 'generation_config', None) or LmdeployGenerationConfig()
     assert isinstance(generation_config, LmdeployGenerationConfig)
     request_list = deepcopy(request_list)
     generation_config = deepcopy(generation_config)
-    if generation_info is None:
-        generation_info = {}
-    else:
-        generation_info.clear()
 
     resp_list, generators = _prepare_lmdeploy_request(
         lmdeploy_engine,
@@ -336,6 +414,7 @@ def inference_lmdeploy(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine],
                 pass
         request = request_list[i]
         input_ids = inputs['input_ids']
+        logprobs = output.logprobs
         response = template.generate_ids_to_response(output.token_ids)
         query = request['query']
         history = request['history']
@@ -343,6 +422,8 @@ def inference_lmdeploy(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine],
 
         generation_info['num_generated_tokens'] += len(output.token_ids)
         resp_list[i] = {'response': response, 'history': history}
+        if logprobs is not None:
+            resp_list[i]['logprobs'] = logprobs
         if verbose:
             print(f'{prompt_prefix}{tokenizer.decode(input_ids, False)}{output_prefix}', end='')
             print(tokenizer.decode(output.token_ids, False))
@@ -356,7 +437,7 @@ def inference_lmdeploy(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine],
     prog_bar.close()
     runtime = time.perf_counter() - runtime
     generation_info['runtime'] = runtime
-    generation_info['samples/s'] = len(generators) / runtime
+    generation_info['samples/s'] = generation_info['num_samples'] / runtime
     generation_info['tokens/s'] = generation_info['num_generated_tokens'] / runtime
     return resp_list
 
@@ -381,21 +462,16 @@ def prepare_lmdeploy_engine_template(args: InferArguments) -> Tuple[Union[AsyncE
         model_id_or_path=model_id_or_path)
     tokenizer = lmdeploy_engine.hf_tokenizer
 
-    if not args.do_sample:
-        args.temperature = 0
-
     stop_words = []
     for stop_word in args.stop_words:
         _add_stop_word(stop_words, stop_word, tokenizer=tokenizer)
-    generation_config = LmdeployGenerationConfig(
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        top_p=args.top_p,
-        stop_words=stop_words,
-        repetition_penalty=args.repetition_penalty)
-    logger.info(f'generation_config: {generation_config}')
-    lmdeploy_engine.generation_config = generation_config
+    setattr(lmdeploy_engine.generation_config, 'max_new_tokens', args.max_new_tokens)
+    for k in ['temperature', 'do_sample', 'top_k', 'top_p', 'repetition_penalty']:
+        val = getattr(args, k, None)
+        if val is not None:
+            setattr(lmdeploy_engine.generation_config, k, val)
+    logger.info(f'lmdeploy_engine.generation_config: {lmdeploy_engine.generation_config}')
+
     template: Template = get_template(
         args.template_type,
         tokenizer,

@@ -31,7 +31,7 @@
 
 transformers的auto device map算法对多模态模型支持不友好, 这可能导致不同 GPU 卡之间的显存分配不均匀。
 - 可以通过参数`--device_max_memory`设置每张卡的显存使用, 比如四卡环境, 可以设置`--device_max_memory 15GB 15GB 15GB 15GB`
-- 或者通过`--device_map_config_path`显式指定device map
+- 或者通过`--device_map_config`显式指定device map
 
 3. **InternVL2模型与前系列(InternVL-V1.5和Mini-InternVL)模型的区别**
 
@@ -296,7 +296,6 @@ road:
 LoRA微调:
 
 **注意**
-- 默认只对LLM部分的qkv进行lora微调. 如果你想对所有linear含vision模型部分都进行微调, 可以指定`--lora_target_modules ALL`.
 - 如果你的GPU不支持flash attention, 使用参数`--use_flash_attn false`
 
 ```shell
@@ -339,7 +338,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 swift sft \
 ```
 
 ## 自定义数据集
-[自定义数据集](../LLM/自定义与拓展.md#-推荐命令行参数的形式)支持json, jsonl样式, 以下是自定义数据集的例子:
+[自定义数据集](../Instruction/自定义与拓展.md#-推荐命令行参数的形式)支持json, jsonl样式, 以下是自定义数据集的例子:
 
 (支持多轮对话, 图片支持传入本地路径或URL, 多张图片用逗号','分割)
 
@@ -374,7 +373,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 swift sft \
 **InternVL2**模型支持grounding任务的训练，数据参考下面的格式：
 ```jsonl
 {"query": "Find <bbox>", "response": "<ref-object>", "images": ["/coco2014/train2014/COCO_train2014_000000001507.jpg"], "objects": "[{\"caption\": \"guy in red\", \"bbox\": [138, 136, 235, 359], \"bbox_type\": \"real\", \"image\": 0}]" }
-{"query": "Find <ref-object>", "response": "<bbox>", "images": ["/coco2014/train2014/COCO_train2014_000000001507.jpg"], "objects": "[{\"caption\": \"guy in red\", \"bbox\": [138, 136, 235, 359], \"bbox_type\": \"real\", \"image\": 0}]" }
+# mapping to multiple bboxes
+{"query": "Find <ref-object>", "response": "<bbox>", "images": ["/coco2014/train2014/COCO_train2014_000000001507.jpg"], "objects": "[{\"caption\": \"guy in red\", \"bbox\": [[138, 136, 235, 359], [1,2,3,4]], \"bbox_type\": \"real\", \"image\": 0}]" }
 ```
 上述objects字段中包含了一个json string，其中有四个字段：
     a. caption bbox对应的物体描述
@@ -383,7 +383,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 swift sft \
     d. image: bbox对应的图片是第几张, 索引从0开始
 上述格式会被转换为InternVL2可识别的格式，具体来说：
 ```jsonl
-{"query": "Find <ref>the man</ref>", "response": "<box> [[200, 200, 600, 600]] </box>"}
+{"query": "Find <ref>the man</ref>", "response": "<box> [[200, 200, 600, 600]] </box>", "images": ["image_path1"]}
 ```
 也可以直接传入上述格式，但是注意坐标请使用千分位坐标。
 
